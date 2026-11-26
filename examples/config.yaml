@@ -1,0 +1,56 @@
+# Seat, model, and quota config for `swarm spawn` and `swarm worker`.
+# Copy to ~/.config/swarm/config.yaml (or point SWARM_CONFIG at it) and edit.
+#
+# Each seat's `kind` picks the adapter in swarm.worker:
+#   claude  `<launcher> -p --output-format json`, one session resumed across wakes
+#   codex   `codex exec --json`, resumed with `codex exec resume <thread>`
+#   omp     `omp -p --mode json`, one --session-dir per worker
+#   agy     read-only reviewer; the worker posts its output to the board
+#   cmd     any command; prompt on stdin, JSON usage lines on stdout
+
+seats:
+  claude:
+    kind: claude
+    launcher: [claude]
+  # A second Claude account with its own config directory:
+  # claude-work:
+  #   kind: claude
+  #   launcher: [env, CLAUDE_CONFIG_DIR=/path/to/.claude-work, claude]
+  codex:
+    kind: codex
+  omp:
+    kind: omp
+    # pool: claude    # set if omp draws from the same subscription as `claude`
+  agy:
+    kind: agy
+    command: [agy]
+
+# Models the swarm may pick, with a numeric capability score (e.g. an eval index)
+# and the seats that can run each model. `effort` is passed through to codex.
+models:
+  - {model: claude-sonnet-4-6, index: 55, seats: [claude]}
+  - {model: gpt-5.4, index: 57, seats: [codex], effort: high}
+  - {model: gemini-2.5-pro, index: 59, seats: [agy]}
+
+# Each role gets an intelligence band so a swarm runs at a consistent level.
+# A role with `writes: false` may use read-only seats (like `agy`).
+roles:
+  worker: {min: 54, max: 58}
+  verifier: {min: 57, max: 62, writes: false}
+
+# Optional: command that prints each seat's spare quota as one JSON object, e.g.:
+#   {"claude": 16.2, "codex": 4.0, "agy": null}
+# Higher wins inside the band; "throttled" skips the seat; null uses unknown_score.
+# Without a picker, every seat scores unknown_score and the higher model index wins.
+# picker: [my-quota-script, --json]
+unknown_score: 0
+
+# Each live member already in the room docks its seat's pool by this amount so
+# parallel spawns spread across seats instead of piling onto one cached winner.
+spread_penalty: 10
+
+# Extra flags passed to every `claude` seat (headless runs cannot answer prompts).
+claude_flags: >-
+  --permission-mode acceptEdits
+  --allowedTools Edit Write Read Glob Grep Bash(git:*) Bash(gh:*) Bash(swarm:*)
+  Bash(python:*) Bash(pytest:*) Bash(ls:*) Bash(cat:*) Bash(mkdir:*)

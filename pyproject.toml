@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-swarm"
+version = "0.1.0"
+description = "Durable Redis Streams rooms and multi-harness agent swarms with a live TUI board."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "redis>=5.0",
+    "pyyaml>=6.0",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = [
+    "fakeredis>=2.20",
+]
+
+[project.scripts]
+swarm = "swarm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+swarm = ["prompts/*.md"]
