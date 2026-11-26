@@ -1,26 +1,43 @@
 """Unified `swarm` CLI: durable agent rooms, multi-harness swarm orchestration, and live TUI board."""
 import argparse
+import codecs
 import json
 import os
 import shutil
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from swarm import __version__, store
 from swarm import config as swarm_config
 
+DONE_SUMMARY = "Swarm finished."
+FOLLOW_POLL_SECONDS = 0.1
+
+
+def _post(r, room, frm, to, body, **fields):
+    receipt = r.xadd(store.k_stream(room), store.make_fields(frm, to, body, **fields))
+    store.touch_presence(r, room, frm)
+    return receipt
+
+
+def _read_body(body):
+    """The stripped message body: stdin for '-' or a pipe with no argument, else the argument."""
+    use_stdin = body == "-" or (body is None and not sys.stdin.isatty())
+    return (sys.stdin.read() if use_stdin else body or "").strip()
+
 
 def cmd_send(r, args):
-    use_stdin = args.body == "-" or (args.body is None and not sys.stdin.isatty())
-    body = (sys.stdin.read() if use_stdin else args.body or "").strip()
+    body = _read_body(args.body)
     if not body:
         print("swarm send: empty body", file=sys.stderr)
         return 2
     if args.kind in store.WORKER_KINDS:
         print(f"swarm send: --kind {args.kind} is reserved for swarm worker's own posts", file=sys.stderr)
         return 2
-    message = store.make_fields(
+    receipt = _post(
+        r,
+        args.room,
         args.frm,
         args.to,
         body,
@@ -28,8 +45,6 @@ def cmd_send(r, args):
         topic=args.topic or "",
         reply_to=args.reply_to or "",
     )
-    receipt = r.xadd(store.k_stream(args.room), message)
-    store.touch_presence(r, args.room, args.frm)
     for mention in store.unknown_mentions(r, args.room, args.to):
         print(
             f"swarm send: warning: no agent or group '@{mention}' in room={args.room} yet; "
@@ -41,6 +56,52 @@ def cmd_send(r, args):
         if args.json else f"sent {receipt} to room={args.room} to={args.to}"
     )
     print(confirmation)
+    return 0
+
+
+def cmd_done(r, args):
+    body = _read_body(args.body)
+    if not body and args.body is not None:
+        print("swarm done: empty body", file=sys.stderr)
+        return 2
+    if r.hget(store.k_member(args.room, args.frm), "role") != "coordinator":
+        print(
+            f"swarm done: warning: '{args.frm}' does not have the coordinator role in room={args.room}, "
+            "so workers will not retire; pass --from <coordinator id>",
+            file=sys.stderr,
+        )
+    receipt = _post(r, args.room, args.frm, "all", body or DONE_SUMMARY, kind="done")
+    print(
+        json.dumps({"id": receipt, "room": args.room, "kind": "done"})
+        if args.json else f"sent {receipt} to room={args.room} to=all (done)"
+    )
+    return 0
+
+
+def _write_stop_file(room, agent, reason):
+    path = store.room_file(room, f"stop-{agent}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as sentinel:
+        sentinel.write(f"{reason}\n" if reason else "")
+
+
+def cmd_stop(r, args):
+    room, agent = args.room, args.agent
+    if agent == "all":
+        print("swarm stop: 'all' would retire every worker; use `swarm done` to end the swarm", file=sys.stderr)
+        return 2
+    if not r.exists(store.k_member(room, agent), store.k_presence(room, agent)):
+        print(f"swarm stop: warning: no agent '{agent}' in room={room}", file=sys.stderr)
+    receipt = _post(r, room, args.frm, agent, store.SHUTDOWN)
+    try:
+        _write_stop_file(room, agent, args.reason)
+    except OSError as exc:
+        print(f"swarm stop: the shutdown was sent ({receipt}) but the stop file failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps({"stopped": agent, "room": room, "id": receipt})
+        if args.json else f"stopped {agent} in room={room} (sent {receipt})"
+    )
     return 0
 
 
@@ -384,6 +445,37 @@ def cmd_clear(r, args):
     return 0
 
 
+# ---- worker logs -----------------------------------------------------------
+
+def _print_log(log, count, follow):
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    chunk = b"".join(deque(log, maxlen=count))
+    while True:
+        sys.stdout.write(store.terminal_text(decoder.decode(chunk, final=not follow)))
+        sys.stdout.flush()
+        if not follow:
+            return
+        chunk = log.read(65536)
+        if not chunk:
+            time.sleep(FOLLOW_POLL_SECONDS)
+
+
+def cmd_logs(args):
+    path = store.room_file(args.room, f"{args.agent}.log")
+    try:
+        with open(path, "rb") as log:
+            _print_log(log, args.n, args.follow)
+    except FileNotFoundError:
+        print(f"swarm logs: no log for '{args.agent}' in room={args.room}: {path}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"swarm logs: cannot read {path}: {exc.strerror}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 # ---- doctor ----------------------------------------------------------------
 
 def seat_binary(seat_cfg):
@@ -450,13 +542,16 @@ def build_parser():
     )
     default_url = store.default_url()
     parser.add_argument("--url", default=default_url, help=f"Redis URL (default {default_url})")
-    parser.add_argument("--room", type=store.ident, help=f"room name (default {store.default_room()})")
+    parser.add_argument(
+        "--room", type=store.room_arg,
+        help=f"room name, or . for this git repository's name (default {store.default_room()})",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--version", action="version", version=f"swarm {__version__}")
 
     shared = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
     shared.add_argument("--url", help="Redis URL")
-    shared.add_argument("--room", type=store.ident, help="room name")
+    shared.add_argument("--room", type=store.room_arg, help="room name, or . for this git repository's name")
     shared.add_argument("--json", action="store_true", help="machine-readable output")
     commands = parser.add_subparsers(dest="cmd")
 
@@ -478,6 +573,24 @@ def build_parser():
     options.add_argument("--reply-to", default="", help="message id you're replying to")
     options.add_argument("--kind", default="msg", help="msg|question|answer|system|done (default msg)")
     options.add_argument("body", nargs="?", help="message text, or '-' / piped stdin")
+
+    options = command("done", "end the swarm: post --kind done to all")
+    options.add_argument(
+        "--from", dest="frm", type=store.ident, default="coordinator", help="coordinator id (default coordinator)"
+    )
+    options.add_argument("body", nargs="?", help=f"summary, or '-' / piped stdin (default {DONE_SUMMARY!r})")
+
+    options = command("stop", "retire one worker and leave the rest of the room running")
+    options.add_argument("agent", type=store.ident, help="member id to stop")
+    options.add_argument("reason", nargs="?", help="why, recorded in the worker's stop file")
+    options.add_argument(
+        "--from", dest="frm", type=store.ident, default="coordinator", help="sender id (default coordinator)"
+    )
+
+    options = command("logs", "show a worker's log file (no Redis needed)")
+    options.add_argument("agent", type=store.ident, help="member id")
+    options.add_argument("-n", type=store.non_negative_int, default=50, help="last N lines (default 50)")
+    options.add_argument("-f", "--follow", action="store_true", help="keep printing as the log grows")
 
     command("poll", "read new messages addressed to you (non-blocking)", agent=True, topic=True)
     options = command("wait", "block until a message addressed to you arrives", agent=True, topic=True)
@@ -549,11 +662,18 @@ def build_parser():
 
     command("board", "open the terminal TUI board (or room picker when --room is omitted)")
     command("doctor", "check Redis connectivity, config file and seat binaries")
+    options = command("init", "write a starter config for the harnesses found on PATH")
+    options.add_argument("--force", action="store_true", help="overwrite an existing config")
+    options.add_argument(
+        "--link-skills", action="store_true", help="symlink the bundled skills into your harness skills directories"
+    )
     return parser
 
 
 DISPATCH = {
     "send": cmd_send,
+    "done": cmd_done,
+    "stop": cmd_stop,
     "poll": cmd_poll,
     "wait": cmd_wait,
     "tail": cmd_tail,
@@ -578,7 +698,7 @@ DISPATCH = {
 def main(argv=None):
     args = build_parser().parse_args(argv)
     args.room_given = args.room is not None
-    args.room = args.room or store.default_room()
+    args.room = args.room or store.env_room()
 
     if args.cmd is None:
         if not args.json and sys.stdin.isatty() and sys.stdout.isatty():
@@ -589,6 +709,11 @@ def main(argv=None):
 
     if args.cmd == "doctor":
         return cmd_doctor(args)
+    if args.cmd == "logs":
+        return cmd_logs(args)
+    if args.cmd == "init":
+        from swarm import setup
+        return setup.run_init(args)
     if args.cmd == "spawn":
         from swarm import spawn
         return spawn.run_spawn(args)
