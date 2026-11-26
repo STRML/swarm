@@ -1078,9 +1078,16 @@ def read_log_tail(path):
     return [line.removesuffix("\r") for line in lines[-LOG_TAIL_LINES:]]
 
 
-def log_rows(path, name, width):
-    """The log tail as escaped, wrapped rows. A name that is not a plain id never reaches the filesystem."""
+def log_rows(path, room, name, width):
+    """The log tail as escaped, wrapped rows.
+
+    Rooms and members read from Redis may predate CLI validation. One that is not a plain id, or a room that is a
+    dot directory, never reaches the filesystem.
+    """
     try:
+        if room in (".", ".."):
+            raise FileNotFoundError(path)
+        store.ident(room)
         store.ident(name)
         lines = read_log_tail(path)
     except (argparse.ArgumentTypeError, FileNotFoundError):
@@ -1099,7 +1106,7 @@ def log_view(state, width, height):
     if name != state.log_name:
         state.log_name, state.log_top = name, None
     if state.log_top is None or state.log_width != width:
-        state.log_lines, state.log_width = log_rows(path, name, width), width
+        state.log_lines, state.log_width = log_rows(path, state.room, name, width), width
     total = len(state.log_lines)
     state.log_max = max(total - height, 0)
     if state.log_top is not None and state.log_top >= state.log_max:

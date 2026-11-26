@@ -662,6 +662,23 @@ class LogPeekTests(BoardCase):
             self.assertNotIn("TOPSECRET", "".join(self.body(app)))
             self.assertIn("(no log file at", "".join(self.body(app)))
 
+    async def test_legacy_room_name_cannot_escape_the_state_directory(self):
+        state_dir = os.path.join(self.root, "state")
+        os.makedirs(os.path.join(state_dir, "a"))
+        for room, outside in ((".", state_dir), ("..", self.root), ("a/..", state_dir)):
+            with self.subTest(room=room), mock.patch.dict(os.environ, {"SWARM_STATE_DIR": state_dir}):
+                with open(os.path.join(outside, "w1.log"), "w", encoding="utf-8") as handle:
+                    handle.write("TOPSECRET\n")
+                self.r.xadd(store.k_stream(room), store.make_fields("w1", "all", "hi"))
+                app = board.SwarmBoard(self.r, room, interval=0)
+                async with app.run_test(size=SIZE) as pilot:
+                    await settle(pilot, lambda: app.state.posts)
+                    await pilot.press("l")
+                    await pilot.pause()
+                    self.assertEqual(app.state.member_name(), "w1")
+                    self.assertNotIn("TOPSECRET", "".join(self.body(app)))
+                    self.assertIn("(no log file at", "".join(self.body(app)))
+
 
 @unittest.skipIf(fakeredis is None, "fakeredis/textual not installed")
 class MouseTests(BoardCase):
