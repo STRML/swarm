@@ -59,7 +59,7 @@ def default_room():
 
 def key_prefix():
     raw = os.environ.get("SWARM_KEY_PREFIX") or DEFAULT_PREFIX
-    if not _ID_RE.match(raw):
+    if not _ID_RE.fullmatch(raw):
         sys.stderr.write(f"swarm: SWARM_KEY_PREFIX={raw!r} must match [A-Za-z0-9._-]+\n")
         raise SystemExit(2)
     return raw
@@ -179,7 +179,7 @@ def touch_presence(r, room, agent):
 # ---- input validation ------------------------------------------------------
 
 def _require(value, pattern, complaint):
-    if pattern.match(value):
+    if pattern.fullmatch(value):
         return value
     raise argparse.ArgumentTypeError(f"'{value}'{complaint}")
 
@@ -196,6 +196,15 @@ def room_arg(value):
     return resolve_room(ident(value))
 
 
+def env_room():
+    """The room used without --room: $SWARM_ROOM or the default, held to the same rules. Exits 2 if invalid."""
+    try:
+        return room_arg(default_room())
+    except argparse.ArgumentTypeError as exc:
+        sys.stderr.write(f"swarm: SWARM_ROOM: {exc}\n")
+        raise SystemExit(2)
+
+
 def archive_id(value):
     return _require(value, ARCHIVE_ID_RE, " must look like <room>:<epoch-ms>, as `swarm rooms --archived` prints it")
 
@@ -203,7 +212,7 @@ def archive_id(value):
 def recipients(value):
     """argparse type for `--to`. Repeats collapse in first-seen order, and `all` absorbs every other name."""
     names = dict.fromkeys(value.split(","))
-    if not all(map(_RECIPIENT_RE.match, names)):
+    if not all(map(_RECIPIENT_RE.fullmatch, names)):
         raise argparse.ArgumentTypeError(
             f"'{value}': each recipient must be an id, @name or 'all' ([A-Za-z0-9._-]+)"
         )

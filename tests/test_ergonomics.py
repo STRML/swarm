@@ -85,6 +85,35 @@ class RoomDotE2E(CliE2E):
         repo = self.repo(self.room)
         self.assertEqual(self.sent_room(repo, SWARM_ROOM="."), self.room)
 
+    def test_unsafe_swarm_room_environment_exits_2_and_touches_no_file_or_stream(self):
+        state = os.path.join(self.tmp, "outer", "state")
+        outside = self.directory("outside")
+        with open(os.path.join(outside, "w1.log"), "w") as f:
+            f.write("not yours\n")
+        for value in ("..", "../../outside", outside, "a/b", "a b", "a:b", "..\n", "a\n"):
+            for argv in (("stop", "w1"), ("logs", "w1"), ("send", "--from", "a", "x")):
+                with self.subTest(value=value, argv=argv):
+                    res = self.at(self.tmp, *argv, rc=2, SWARM_ROOM=value, SWARM_STATE_DIR=state)
+                    self.assertIn("SWARM_ROOM", res.stderr)
+                    self.assertEqual(res.stdout, "")
+                    self.assertFalse(self.r.exists(store.k_stream(value)))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "outer")))
+        self.assertEqual(os.listdir(outside), ["w1.log"])
+
+    def test_names_with_a_trailing_newline_exit_2(self):
+        for argv in (
+            ("--room", "a\n", "send", "--from", "a", "x"),
+            ("--room", self.room, "send", "--from", "a\n", "x"),
+            ("--room", self.room, "send", "--from", "a", "--to", "b\n", "x"),
+        ):
+            with self.subTest(argv=argv):
+                self.at(self.tmp, *argv, rc=2)
+        self.at(self.tmp, "--room", self.room, "tail", rc=2, SWARM_KEY_PREFIX="swarm\n")
+        self.assertEqual(list(self.r.scan_iter(match=f"*{self.room}*")), [])
+
+    def test_explicit_room_ignores_an_unsafe_swarm_room_environment(self):
+        self.assertEqual(self.sent_room(self.tmp, "--room", self.room, SWARM_ROOM=".."), self.room)
+
     def test_dot_counts_as_an_explicit_room_for_guarded_commands(self):
         repo = self.repo(self.room)
         for name, argv in (("before", ("--room", ".", "archive")), ("after", ("archive", "--room", "."))):

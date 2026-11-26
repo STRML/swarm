@@ -698,7 +698,7 @@ DISPATCH = {
 def main(argv=None):
     args = build_parser().parse_args(argv)
     args.room_given = args.room is not None
-    args.room = args.room or store.resolve_room(store.default_room())
+    args.room = args.room or store.env_room()
 
     if args.cmd is None:
         if not args.json and sys.stdin.isatty() and sys.stdout.isatty():
