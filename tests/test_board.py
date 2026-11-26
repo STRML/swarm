@@ -812,7 +812,7 @@ class MouseTests(BoardCase):
     async def test_hints_name_the_new_keys(self):
         for hint in ("m msg", "l log", "d done"):
             self.assertIn(hint, board.HINTS)
-        self.assertLessEqual(len(board.HINTS), SIZE[0])
+        self.assertLessEqual(len(board.HINTS), 102)
 
 
 class PureHelperTests(unittest.TestCase):

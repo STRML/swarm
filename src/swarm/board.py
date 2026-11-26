@@ -160,8 +160,8 @@ ROSTER_ROWS = 2
 EXPANDED_CAP = 20
 PAGE_FALLBACK = 10
 HINTS = (
-    "←→↑↓ move · tab pane · m msg · l log · d done · ⏎ hide · space expand · "
-    "p filter · o open · f follow · z zoom · b rooms"
+    "↑↓←→/tab · m msg · l log · d done · ⏎ hide · ␣ expand · "
+    "p filter · o dir · f follow · z zoom · b rooms"
 )
 OPERATOR = "operator"
 COMPOSE_HINT = "message · tab: recipient · @name or /to a,b · enter sends · esc cancels"
