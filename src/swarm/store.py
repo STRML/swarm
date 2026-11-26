@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -69,6 +70,45 @@ def state_root():
         return os.path.abspath(os.environ["SWARM_STATE_DIR"])
     xdg = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(xdg, "swarm")
+
+
+def room_file(room, name):
+    return os.path.join(state_root(), room, name)
+
+
+# ---- room names ------------------------------------------------------------
+
+# A --room value meaning "the repository I am standing in".
+REPO_ROOM = "."
+
+
+def _git_common_dir():
+    command = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except OSError:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _repo_name():
+    """The main working tree's basename, shared by all of its worktrees; the current directory's outside git."""
+    common = _git_common_dir()
+    if not common:
+        return os.path.basename(os.getcwd())
+    if os.path.basename(common) == ".git":
+        return os.path.basename(os.path.dirname(common))
+    return os.path.basename(common).removesuffix(".git")
+
+
+def sanitize_room(name):
+    """A directory name as a room name that is also safe as a path component."""
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", name).strip("-")
+    return DEFAULT_ROOM if slug in ("", ".", "..") else slug
+
+
+def resolve_room(value):
+    return sanitize_room(_repo_name()) if value == REPO_ROOM else value
 
 
 # ---- key layout ------------------------------------------------------------
@@ -149,6 +189,13 @@ def ident(value):
     return _require(value, _ID_RE, " is not a valid name; use only letters, digits, '.', '_' and '-'")
 
 
+def room_arg(value):
+    """argparse type for --room: '.' becomes the repository's name; '..' would escape the state directory."""
+    if value == "..":
+        raise argparse.ArgumentTypeError("'..' is not a valid room name")
+    return resolve_room(ident(value))
+
+
 def archive_id(value):
     return _require(value, ARCHIVE_ID_RE, " must look like <room>:<epoch-ms>, as `swarm rooms --archived` prints it")
 
@@ -169,6 +216,12 @@ def positive_int(value):
     if number > 0:
         return number
     raise argparse.ArgumentTypeError(f"expected a whole number above zero, got '{value}'")
+
+
+def non_negative_int(value):
+    if value.isdigit():
+        return int(value)
+    raise argparse.ArgumentTypeError(f"expected a whole number, got '{value}'")
 
 
 def bounded_number(text, maximum):
