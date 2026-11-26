@@ -1,9 +1,12 @@
 """Terminal board and room picker for swarm rooms.
 
 Run `swarm board` (no --room) for the live room picker, or `swarm board --room R` for one room's live board.
-In the picker, `a` archives, `x` clears (after `y`), and idle rooms are swept on open. A board is read-only;
-`b` returns to the picker.
+In the picker, `a` archives, `x` clears (after `y`), and idle rooms are swept on open. A board writes only on
+request: `m` posts a message as `operator`, `d` (after `y`) ends the swarm. `l` peeks at a worker log, and `b`
+returns to the picker.
 """
+import argparse
+import contextlib
 import io
 import os
 import re
@@ -20,11 +23,12 @@ import redis
 from rich.console import Console
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.app import App
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import DataTable, Rule, Static
+from textual.widgets import DataTable, Input, Rule, Static
 
 from swarm import store
 
@@ -156,9 +160,20 @@ ROSTER_ROWS = 2
 EXPANDED_CAP = 20
 PAGE_FALLBACK = 10
 HINTS = (
-    "←→↑↓ move · tab pane · enter hide msg · space expand · p filter · "
-    "o open · f follow · z zoom · b rooms · esc back"
+    "↑↓←→/tab · m msg · l log · d done · ⏎ hide · ␣ expand · "
+    "p filter · o dir · f follow · z zoom · b rooms"
 )
+OPERATOR = "operator"
+COMPOSE_HINT = "message · tab: recipient · @name or /to a,b · enter sends · esc cancels"
+NOTICE_SECONDS = 5
+ERROR_STYLE = "bold #ff7b72"
+LOG_TAIL_LINES = 200
+LOG_TAIL_BYTES = 128 * 1024
+WHEEL_STEP = 3
+BLOCKED_WHILE_COMPOSING = frozenset({
+    "compose", "expand", "filter", "finish", "leave", "log", "move", "move_horiz", "open_workspace", "page",
+    "picker", "toggle_follow", "toggle_message", "zoom",
+})
 PICKER_HINTS = "enter open board · a archive · x clear · r refresh · q quit"
 PICKER = "picker"
 KIND_TAGS = {"done": ("✓ done", f"bold {GREEN}"), "system": ("⚙", DIM), "question": ("?", "bold #e3b341")}
@@ -420,7 +435,20 @@ class BoardState:
         self.error = ""
         self.colors = {}
         self.post_rows = None
+        self.line_seqs = []
         self.frame = 0
+        self.compose_default = None
+        self.compose_to = "all"
+        self.pending_finish = False
+        self.notice = None
+        self.notice_until = 0.0
+        self.show_log = False
+        self.log_return = "posts"
+        self.log_name = None
+        self.log_lines = []
+        self.log_width = 0
+        self.log_top = None
+        self.log_max = 0
 
     def ingest(self, snap):
         if snap.reset:
@@ -583,12 +611,62 @@ class BoardState:
         self.member = names[target]
 
     def move_post(self, delta):
+        self.select_post(self.sel + delta)
+
+    def select_post(self, index):
         visible = self.visible()
         if not visible:
             return
-        self.sel = clamp(self.sel + delta, 0, len(visible) - 1)
+        self.sel = clamp(index, 0, len(visible) - 1)
         self.follow = self.follow and self.sel == len(visible) - 1
         self.member = visible[self.sel].sender
+
+    @property
+    def composing(self):
+        return self.compose_default is not None
+
+    def default_recipient(self):
+        post = self.selected_post()
+        name = self.member_name() if self.focus == "roster" else post and post.sender
+        try:
+            return store.recipients(f"@{name}") if name else "all"
+        except argparse.ArgumentTypeError:
+            return "all"
+
+    def open_compose(self):
+        self.compose_default = self.compose_to = self.default_recipient()
+
+    def close_compose(self):
+        self.compose_default = None
+
+    def toggle_recipient(self):
+        self.compose_to = "all" if self.compose_to == self.compose_default else self.compose_default
+
+    def coordinator_name(self):
+        return next(filter(self.is_coordinator, self.roster()), "coordinator")
+
+    def toggle_log(self):
+        if self.show_log:
+            self.close_log()
+        elif self.member_name() is not None:
+            self.show_log, self.log_name = True, None
+            self.log_return, self.focus = self.focus, "message"
+
+    def close_log(self):
+        self.show_log = False
+        if self.zoom or self.focus != "message":
+            return
+        self.focus = self.log_return
+        if self.focus == "message" and not self.show_message:
+            self.focus = "posts"
+
+    def scroll_message(self, delta):
+        if not self.show_log:
+            self.msg_top = max(self.msg_top + delta, 0)
+            return
+        top = self.log_max if self.log_top is None else self.log_top
+        top = max(top + delta, 0)
+        self.log_top = None if top >= self.log_max else top
 
     def toggle_follow(self):
         self.follow = not self.follow
@@ -609,12 +687,19 @@ class BoardState:
         if post:
             self.expanded ^= {post.seq}
 
+    @property
+    def message_visible(self):
+        return self.show_message or self.zoom or self.show_log
+
     def cycle_focus(self):
-        panes = [p for p in PANES if p != "message" or self.show_message or self.zoom]
+        panes = [p for p in PANES if p != "message" or self.message_visible]
         index = panes.index(self.focus) if self.focus in panes else -1
         self.focus = panes[(index + 1) % len(panes)]
 
     def toggle_message(self):
+        if self.show_log:
+            self.close_log()
+            return
         self.show_message = not self.show_message
         self.zoom = self.zoom and self.show_message
         if not self.show_message and self.focus == "message":
@@ -626,7 +711,9 @@ class BoardState:
             self.show_message, self.focus = True, "message"
 
     def escape(self):
-        if self.zoom:
+        if self.show_log:
+            self.close_log()
+        elif self.zoom:
             self.zoom = False
         else:
             self.set_filter(None)
@@ -679,7 +766,7 @@ def body_lines(body, width, state):
     for raw in body.split("\n"):
         if raw.strip().startswith("```"):
             fenced = not fenced
-            out.append(Text(raw, style=DIM))
+            out.extend(Text(raw, style=DIM).wrap(CONSOLE, max(width, 8)))
             continue
         out.extend(wrap_line(raw, width, state, fenced))
     return out
@@ -771,9 +858,25 @@ def card_lines(state, name, colw, selected, now):
     return lines
 
 
+def card_width(width):
+    return max((width - (CARD_COLUMNS - 1) * 2) // CARD_COLUMNS, 8)
+
+
+def card_at(state, width, x, y):
+    """The member whose card covers content cell (x, y) of the roster pane, or None for gaps and blank space."""
+    colw = card_width(width)
+    col, dx = divmod(x, colw + 2)
+    row, dy = divmod(y, CARD_LINES + 1)
+    if col >= CARD_COLUMNS or dx >= colw or row >= ROSTER_ROWS or dy >= CARD_LINES:
+        return None
+    names = state.active()
+    index = (state.roster_top + row) * CARD_COLUMNS + col
+    return names[index] if index < len(names) else None
+
+
 def card_rows(state, width, now):
     names = state.active()
-    colw = max((width - (CARD_COLUMNS - 1) * 2) // CARD_COLUMNS, 8)
+    colw = card_width(width)
     selected = state.member_name()
     cells = [card_lines(state, n, colw, n == selected, now) for n in names]
     blank = [Text(" " * colw)] * CARD_LINES
@@ -929,7 +1032,7 @@ def expanded_lines(post, state, width):
 
 def posts_view(state, width, height, now):
     visible = state.visible()
-    state.post_rows = None
+    state.post_rows, state.line_seqs = None, []
     if not visible:
         return Text("no posts yet", style=DIM)
     stamp_w = max(len(fmt_when(p.ms, now)) for p in state.posts)
@@ -942,6 +1045,7 @@ def posts_view(state, width, height, now):
         lines.append(post_row(post, state, widths, index == state.sel, focused))
         if post.seq in state.expanded:
             lines.extend(expanded_lines(post, state, width))
+        state.line_seqs.extend([post.seq] * (len(lines) - starts[-1]))
     first = starts[state.sel]
     last = (starts[state.sel + 1] if state.sel + 1 < len(starts) else len(lines)) - 1
     state.post_top = keep_visible(state.post_top, first, last, height)
@@ -949,6 +1053,68 @@ def posts_view(state, width, height, now):
     if len(shown) < len(visible):
         state.post_rows = (shown[0], shown[-1], len(visible))
     return Text("\n").join(lines[state.post_top:state.post_top + height])
+
+
+def post_index_at(state, y):
+    """Index into the visible posts of the one drawn on content row `y` of the posts pane."""
+    line = state.post_top + y
+    if not 0 <= line < len(state.line_seqs):
+        return None
+    seq = state.line_seqs[line]
+    return next((i for i, post in enumerate(state.visible()) if post.seq == seq), None)
+
+
+def read_log_tail(path):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    with open(path, "rb") as handle:
+        start = max(handle.seek(0, os.SEEK_END) - LOG_TAIL_BYTES, 0)
+        handle.seek(start)
+        lines = handle.read(LOG_TAIL_BYTES).decode("utf-8", "replace").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    if start and len(lines) > 1:
+        del lines[0]
+    return [line.removesuffix("\r") for line in lines[-LOG_TAIL_LINES:]]
+
+
+def log_rows(path, room, name, width):
+    """The log tail as escaped, wrapped rows.
+
+    Rooms and members read from Redis may predate CLI validation. One that is not a plain id, or a room that is a
+    dot directory, never reaches the filesystem.
+    """
+    try:
+        if room in (".", ".."):
+            raise FileNotFoundError(path)
+        store.ident(room)
+        store.ident(name)
+        lines = read_log_tail(path)
+    except (argparse.ArgumentTypeError, FileNotFoundError):
+        lines = [f"(no log file at {path})"]
+    except OSError as exc:
+        lines = [f"(cannot read log file at {path}: {exc.strerror})"]
+    return [row for line in lines for row in Text(clean(line)).wrap(CONSOLE, width) or [Text("")]]
+
+
+def log_view(state, width, height):
+    """Pinned to the tail until scrolled up; the lines then hold still so new output cannot move them."""
+    name = state.member_name()
+    if name is None:
+        return label_text("Log · none", state.focus == "message"), Text("")
+    path = os.path.join(store.state_root(), state.room, f"{name}.log")
+    if name != state.log_name:
+        state.log_name, state.log_top = name, None
+    if state.log_top is None or state.log_width != width:
+        state.log_lines, state.log_width = log_rows(path, state.room, name, width), width
+    total = len(state.log_lines)
+    state.log_max = max(total - height, 0)
+    if state.log_top is not None and state.log_top >= state.log_max:
+        state.log_top = None
+    top = state.log_max if state.log_top is None else state.log_top
+    label = label_text(f"Log · {name}", state.focus == "message")
+    label.append(f" · {clean(path)} · lines {min(top + 1, total)}-{min(top + height, total)} of {total}")
+    return label, Text("\n").join(state.log_lines[top:top + height])
 
 
 def message_view(state, width, height, now):
@@ -970,8 +1136,15 @@ def message_view(state, width, height, now):
 
 
 def footer_status(state, now):
+    if state.pending_finish:
+        return Text(
+            f'Finish swarm "{clean(state.room)}" (--kind done to all)? press y to confirm, esc cancels',
+            style=f"bold {GOLD}",
+        )
+    if state.notice and now < state.notice_until:
+        return state.notice
     if state.error:
-        return Text(state.error, style="bold #ff7b72")
+        return Text(state.error, style=ERROR_STYLE)
     post = state.selected_post()
     if post is None:
         return Text("No posts", style=DIM)
@@ -980,14 +1153,36 @@ def footer_status(state, now):
     return Text(f"Post {n}/{len(state.visible())} ({when})", style="#c9d1d9")
 
 
+def parse_compose(line, default):
+    """(recipients, body) for a compose line. Raises ArgumentTypeError when it cannot be sent as typed."""
+    text = line.strip()
+    head = text.split(None, 1)[0]
+    if head == "/to":
+        parts = text.split(None, 2)[1:]
+    elif head.startswith("@"):
+        parts = text.split(None, 1)
+    else:
+        return default, text
+    if len(parts) < 2:
+        raise argparse.ArgumentTypeError("add a recipient and a message: @name message, or /to a,b message")
+    names = ",".join("all" if name == "@all" else name for name in parts[0].split(","))
+    return store.recipients(names), parts[1]
+
+
 class Pane(Static, can_focus=True):
     def on_resize(self, event):
         self.app.render_all()
 
     def on_click(self, event):
-        if self.id in PANES and self.app.state.focus != self.id:
-            self.app.state.focus = self.id
-            self.app.refresh_board()
+        self.app.click_pane(self.id, event.get_content_offset(self))
+
+    def on_mouse_scroll_up(self, event):
+        event.stop()
+        self.app.wheel_pane(self.id, -1)
+
+    def on_mouse_scroll_down(self, event):
+        event.stop()
+        self.app.wheel_pane(self.id, 1)
 
 
 class SwarmBoard(App):
@@ -1002,13 +1197,18 @@ class SwarmBoard(App):
     #posts-sec { height: 2fr; }
     #msg-sec { height: 3fr; }
     #posts, #message { height: 1fr; }
-    #foot { dock: bottom; height: 3; }
+    #bottom { dock: bottom; height: auto; }
+    #compose { height: 1; }
+    #compose-to { width: auto; padding-left: 1; }
+    #compose-input { width: 1fr; height: 1; border: none; padding: 0; }
+    #foot { height: 3; }
     Pane:focus { background: #0b0e14; }
     """
     BINDINGS = [
         Binding("tab", "next_pane", "switch pane", priority=True),
+        Binding("shift+tab", "toggle_recipient", "recipient", priority=True, show=False),
         Binding("left,h", "move_horiz(-1)", "left", show=False),
-        Binding("right,l", "move_horiz(1)", "right", show=False),
+        Binding("right", "move_horiz(1)", "right", show=False),
         Binding("up,k", "move(-1)", "up", show=False),
         Binding("down,j", "move(1)", "down", show=False),
         Binding("pageup", "page(-1)", "page up", show=False),
@@ -1020,8 +1220,11 @@ class SwarmBoard(App):
         Binding("f", "toggle_follow", "follow"),
         Binding("z", "zoom", "zoom"),
         Binding("escape", "back", "back"),
+        Binding("m", "compose", "msg"),
+        Binding("l", "log", "log"),
+        Binding("d", "finish", "done"),
         Binding("b", "picker", "rooms"),
-        Binding("q", "quit", "quit"),
+        Binding("q", "leave", "quit"),
     ]
 
     def __init__(self, r, room, interval=1.0, opener=None):
@@ -1047,12 +1250,17 @@ class SwarmBoard(App):
             yield Rule()
             yield Static(id="message-label")
             yield Pane(id="message")
-        with Vertical(id="foot"):
-            yield Rule()
-            yield Static(id="status")
-            yield Static(Text(HINTS, style=DIM), id="hints")
+        with Vertical(id="bottom"):
+            with Horizontal(id="compose"):
+                yield Static(id="compose-to")
+                yield Input(id="compose-input", placeholder=COMPOSE_HINT, select_on_focus=False)
+            with Vertical(id="foot"):
+                yield Rule()
+                yield Static(id="status")
+                yield Static(Text(HINTS, style=DIM), id="hints")
 
     def on_mount(self):
+        self.query_one("#compose").display = False
         self.query_one("#posts").focus()
         if self.interval:
             self.set_interval(self.interval, self.poll)
@@ -1121,7 +1329,10 @@ class SwarmBoard(App):
 
     def render_message(self, now):
         width, height = self.pane_size("message")
-        label, body = message_view(self.state, width, height, now)
+        if self.state.show_log:
+            label, body = log_view(self.state, width, height)
+        else:
+            label, body = message_view(self.state, width, height, now)
         self.query_one("#message-label", Static).update(label)
         self.query_one("#message", Pane).update(body)
 
@@ -1129,16 +1340,144 @@ class SwarmBoard(App):
         st = self.state
         self.query_one("#top").display = not st.zoom
         self.query_one("#posts-sec").display = not st.zoom
-        self.query_one("#msg-sec").display = st.show_message or st.zoom
+        self.query_one("#msg-sec").display = st.message_visible
+        self.query_one("#compose").display = st.composing
+        self.query_one("#compose-to", Static).update(Text(f"to {st.compose_to} › ", style=f"bold {BLUE}"))
         for pane_id in PANES:
             self.query_one(f"#{pane_id}").set_class(pane_id == st.focus, "active-pane")
-        self.query_one(f"#{st.focus}").focus()
+        self.query_one("#compose-input" if st.composing else f"#{st.focus}").focus()
 
     def refresh_board(self):
         self.render_all()
         self.call_after_refresh(self.render_all)
 
+    async def on_event(self, event):
+        """A key answers a pending finish before any binding, priority ones included, can act on it."""
+        if isinstance(event, events.Key) and not event.is_forwarded:
+            if self.state.pending_finish:
+                self.answer_finish(event.key == "y")
+                return
+            self.state.notice = None
+        await super().on_event(event)
+
+    def on_mouse_down(self, event):
+        if self.state.pending_finish:
+            self.answer_finish(False)
+
+    def on_click(self, event):
+        if self.state.composing:
+            self.set_focus(self.query_one("#compose-input"))
+
+    def check_action(self, action, parameters):
+        if action == "toggle_recipient":
+            return self.state.composing
+        return not (self.state.composing and action in BLOCKED_WHILE_COMPOSING)
+
+    def click_pane(self, pane, offset):
+        if offset is not None:
+            self.select_at(pane, offset)
+        self.state.focus = pane
+        self.refresh_board()
+
+    def select_at(self, pane, offset):
+        st = self.state
+        if pane == "roster":
+            st.member = card_at(st, self.pane_size(pane)[0], offset.x, offset.y) or st.member
+        elif pane == "posts":
+            index = post_index_at(st, offset.y)
+            if index is not None:
+                st.select_post(index)
+
+    def wheel_pane(self, pane, direction):
+        if pane == "roster":
+            self.state.move_member_grid(0, direction)
+        elif pane == "posts":
+            self.state.move_post(direction)
+        else:
+            self.state.scroll_message(direction * WHEEL_STEP)
+        self.render_all()
+
+    def say(self, message, style="#c9d1d9"):
+        self.state.notice = Text(clean(message), style=style)
+        self.state.notice_until = time.time() + NOTICE_SECONDS
+        self.render_all()
+
+    def publish(self, fields):
+        try:
+            self.r.xadd(store.k_stream(self.state.room), fields)
+        except redis.RedisError as exc:
+            self.say(f"redis: {exc}", ERROR_STYLE)
+            return False
+        return True
+
+    def action_compose(self):
+        self.state.open_compose()
+        self.render_all()
+        self.set_focus(self.query_one("#compose-input"))
+        self.call_after_refresh(self.render_all)
+
+    def action_toggle_recipient(self):
+        self.state.toggle_recipient()
+        self.render_all()
+
+    def close_compose(self):
+        self.state.close_compose()
+        self.query_one("#compose-input", Input).value = ""
+        self.render_all()
+        self.set_focus(self.query_one(f"#{self.state.focus}"))
+        self.call_after_refresh(self.render_all)
+
+    def on_input_submitted(self, event):
+        if not event.value.strip():
+            self.close_compose()
+            return
+        try:
+            to, body = parse_compose(event.value, self.state.compose_to)
+        except argparse.ArgumentTypeError as exc:
+            self.say(str(exc), ERROR_STYLE)
+            return
+        if not self.publish(store.make_fields(OPERATOR, to, body)):
+            return
+        note = self.announce(to)
+        self.close_compose()
+        self.say(note)
+        self.poll()
+
+    def announce(self, to):
+        """Mark the operator present and word the confirmation. The post is already in, so errors here are moot."""
+        note = f"sent to {to}"
+        with contextlib.suppress(redis.RedisError):
+            store.touch_presence(self.r, self.state.room, OPERATOR)
+            unknown = store.unknown_mentions(self.r, self.state.room, to)
+            if unknown:
+                note += f" (no member or group named {', '.join(unknown)})"
+        return note
+
+    def action_finish(self):
+        self.state.pending_finish = True
+        self.render_all()
+
+    def answer_finish(self, confirmed):
+        self.state.pending_finish = False
+        if not confirmed:
+            self.say("cancelled")
+            return
+        sender = self.state.coordinator_name()
+        if self.publish(store.make_fields(sender, "all", "Finished from board.", kind="done")):
+            self.say(f"posted --kind done to all as {sender}")
+            self.poll()
+
+    def action_log(self):
+        self.state.toggle_log()
+        self.refresh_board()
+
+    def action_leave(self):
+        self.exit()
+
     def action_next_pane(self):
+        if self.state.composing:
+            self.action_toggle_recipient()
+            return
         self.state.cycle_focus()
         self.refresh_board()
 
@@ -1154,12 +1493,12 @@ class SwarmBoard(App):
         elif st.focus == "posts":
             st.move_post(delta)
         else:
-            st.msg_top = max(st.msg_top + delta, 0)
+            st.scroll_message(delta)
         self.render_all()
 
     def action_page(self, direction):
         if self.state.focus == "message":
-            self.state.msg_top = max(self.state.msg_top + direction * self.pane_size("message")[1], 0)
+            self.state.scroll_message(direction * self.pane_size("message")[1])
             self.render_all()
 
     def action_toggle_message(self):
@@ -1183,6 +1522,9 @@ class SwarmBoard(App):
         self.refresh_board()
 
     def action_back(self):
+        if self.state.composing:
+            self.close_compose()
+            return
         self.state.escape()
         self.refresh_board()
 
