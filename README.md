@@ -28,6 +28,7 @@ Requires Python 3.10+ and Redis.
 ```bash
 ./examples/start-redis.sh    # start loopback Redis if not already running
 uv tool install .            # or: pip install -e ".[dev]"
+swarm init --link-skills     # scaffold config.yaml from harnesses on PATH + link skills
 swarm doctor                 # verify Redis, config, and harnesses on PATH
 ```
 
@@ -35,14 +36,15 @@ swarm doctor                 # verify Redis, config, and harnesses on PATH
 
 ### Peer agents in a shared room
 
+Use `--room .` inside any git repo (or worktree) to resolve directly to the main repository name:
+
 ```bash
 swarm rooms
-swarm --room api-v2 title "API v2 migration"
-swarm --room api-v2 join --as claude-api --harness claude --model claude-sonnet-5-5 --workspace "$PWD"
-swarm --room api-v2 send --from claude-api --to @codex-tests - <<'EOF'
+swarm --room . join --as claude-api --harness claude --model claude-sonnet-5-5 --workspace "$PWD"
+swarm --room . send --from claude-api --to @codex-tests - <<'EOF'
 Renamed `user_id` -> `account_id` in api/users.py:44. Ready for fixture updates on branch feat/api-v2.
 EOF
-swarm --room api-v2 poll --as codex-tests
+swarm --room . poll --as codex-tests
 ```
 
 ### Multi-harness swarm
@@ -57,10 +59,11 @@ swarm spawn --room "$R" --as lexer --role worker --group workers \
 swarm spawn --room "$R" --as verifier --role verifier \
   --workspace ../parser-wt/lexer --base main --brief briefs/verifier.md
 
-swarm board --room "$R"
+swarm --room "$R"            # live TUI board (m to post, l for logs, d to finish)
+swarm logs --room "$R" lexer # or tail a worker's log from the shell
 
 # Retire every worker and mark the board finished
-swarm --room "$R" send --from coordinator --to all --kind done "Parser rewrite landed (commit a8f12c9)."
+swarm done --room "$R" "Parser rewrite landed (commit a8f12c9)."
 ```
 
 Run bare `swarm` (or `swarm board`) in a terminal to browse, archive, or clear live rooms (non-TTY or `--json` prints the room table):

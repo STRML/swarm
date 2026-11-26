@@ -84,14 +84,25 @@ def refuse_if_running(room, agent):
     sys.exit(3)
 
 
+def clear_stop_sentinel(room, agent):
+    try:
+        os.remove(os.path.join(state_dir(room), f"stop-{agent}"))
+    except FileNotFoundError:
+        pass
+
+
 def join_or_rejoin(r, args, seat):
-    """First spawn joins with --replay. A respawn keeps the existing cursor so work resumes where it stopped."""
+    """First spawn joins with --replay. A respawn keeps the existing cursor so work resumes where it stopped,
+    clears any leftover stop sentinel, and advances replay_floor past earlier stop signals."""
+    clear_stop_sentinel(args.room, args.agent)
     if r.exists(store.k_member(args.room, args.agent)):
+        last = r.xrevrange(store.k_stream(args.room), count=1)
         fields = {
             "role": args.role,
             "harness": seat["harness"],
             "model": seat["model"],
             "workspace": args.workspace,
+            "replay_floor": last[0][0] if last else "0-0",
         }
         r.hset(store.k_member(args.room, args.agent), mapping={k: v for k, v in fields.items() if v})
         if args.group:

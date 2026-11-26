@@ -20,13 +20,15 @@ swarm doctor
 
 ## 2. Configure seats (`~/.config/swarm/config.yaml`)
 
-Copy [examples/config.yaml](../examples/config.yaml) to `~/.config/swarm/config.yaml` (or point `SWARM_CONFIG`
-at another path).
+Generate a starter config automatically from whichever harnesses (`claude`, `codex`, `omp`, `agy`) are on
+your `PATH` (and optionally link the bundled skills in one step):
 
 ```bash
-mkdir -p ~/.config/swarm
-cp examples/config.yaml ~/.config/swarm/config.yaml
+swarm init --link-skills
 ```
+
+Or copy [examples/config.yaml](../examples/config.yaml) manually to `~/.config/swarm/config.yaml` (or point
+`SWARM_CONFIG` at another path).
 
 ### Multi-account Claude Code seats
 

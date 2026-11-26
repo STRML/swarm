@@ -26,12 +26,18 @@ When opened with no `--room`, the picker sweeps rooms idle longer than `SWARM_AR
 set `0` to disable) that have zero present members, then lists live rooms newest-first. Archive (`a`) and clear
 (`x` then `y`) refuse when members are present and print the exact `swarm ... --force` command instead.
 
-## Keybindings
+## Keybindings & mouse
+
+Click any roster card or post row to select it directly, and use the mouse wheel to scroll roster, posts, or
+messages.
 
 | Key | In board | In room picker |
 |---|---|---|
-| `← → ↑ ↓` / `h j k l` | 2D grid navigation in roster, move in posts, or scroll message | Move selection |
+| `← → ↑ ↓` / `h j k` | 2D grid navigation in roster, move in posts, or scroll message | Move selection |
 | `tab` | Cycle pane (`roster` / `posts` / `message`) | - |
+| `m` | Open inline compose bar (`tab` toggles `@selected`/`all`; `@who` or `/to` overrides recipient; `enter` posts as `operator`) | - |
+| `l` | Toggle live log peek for selected member (`esc` or `l` closes) | - |
+| `d` then `y` | Finish swarm (`--kind done` to `all`; any other key cancels) | - |
 | `enter` | Hide/show full message pane | Open board for selected room |
 | `space` | Expand/collapse selected post inline | - |
 | `p` | Cycle sender filter (`esc` clears) | - |

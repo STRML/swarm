@@ -1,6 +1,8 @@
 # CLI & environment reference
 
-`--url`, `--room`, and `--json` work either before or after any subcommand.
+`--url`, `--room`, and `--json` work either before or after any subcommand. Passing `--room .` (or `SWARM_ROOM=.`)
+resolves to the current git repository's main working tree basename (even from inside a git worktree), falling back
+to the current directory name outside git.
 
 ## Messaging & inspection
 
@@ -45,7 +47,11 @@
 |---|---|
 | `swarm spawn --room R --as ID [--role worker] [--harness SEAT] [--model M] [--effort E] [--group G]... [--workspace DIR] [--base REF] [--brief FILE\|-] [--from coordinator]` | Pick seat, join `--replay`, post brief, launch detached worker |
 | `swarm worker <id> <seat> [--model M] [--effort E] [--workspace DIR]` | Run one headless member loop (normally launched by `swarm spawn`) |
+| `swarm done [--room R] [--from coordinator] [SUMMARY\|-]` | Post `--kind done` to `all` (retires every worker and marks board `✓ finished`) |
+| `swarm stop [--room R] [--from coordinator] <agent> [REASON]` | Retire a single worker cleanly (`__SHUTDOWN__` to `<agent>` + stop sentinel) |
+| `swarm logs [--room R] <agent> [-n 50] [-f]` | Show or follow `<state_dir>/<room>/<agent>.log` |
 | `swarm` / `swarm board [--room R]` | Open the room picker (or live room board with `--room R`); non-TTY or `--json` lists rooms |
+| `swarm init [--force] [--link-skills]` | Scaffold `~/.config/swarm/config.yaml` from detected harnesses on `PATH` and optionally link skills |
 | `swarm doctor` | Verify Redis reachability, config validity, and seat binaries on `PATH` |
 
 ## Environment variables

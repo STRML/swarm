@@ -185,6 +185,19 @@ class SwarmSpawnE2E(SwarmE2E):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("no seat 'nope'", res.stderr)
 
+    def test_stop_retires_worker_and_respawn_recovers_cleanly(self):
+        first = self.spawn("--as", "w1", "--harness", "cmd")
+        self.wait_for(lambda: self.member("w1").get("state") == "waiting")
+        res = self.swarm("stop", "w1", "taking a break")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.wait_for(lambda: subprocess.run(["kill", "-0", str(first["pid"])], capture_output=True).returncode)
+        self.assertEqual(self.member("w1").get("state"), "retired")
+        self.spawn("--as", "w1", "--harness", "cmd")
+        self.wait_for(lambda: self.member("w1").get("state") == "waiting")
+        self.swarm("send", "--from", "coord", "--to", "w1", "back to work")
+        self.wait_for(lambda: self.member("w1").get("turns") == "1")
+        self.assertIn("back to work", self.seat_calls()[0]["prompt"])
+
 
 class SwarmSpawnArgsTest(unittest.TestCase):
     def test_spawn_requires_a_room(self):

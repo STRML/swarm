@@ -247,6 +247,16 @@ class Worker:
         finally:
             self.unlock()
 
+    def stop_reason(self):
+        for name in (f"stop-{self.agent}", "stop-all"):
+            path = os.path.join(self.state_dir, name)
+            try:
+                text = open(path).read().strip()
+            except OSError:
+                continue
+            return (text.splitlines() or ["stopped"])[0][:200]
+        return "stopped"
+
     def loop(self):
         self.set_state("waiting")
         while not self.should_stop():
@@ -260,6 +270,7 @@ class Worker:
             if msgs:
                 self.wake_safely(msgs)
                 self.commit(cursor)
+        self.set_state("retired", doing=self.stop_reason())
         return 0
 
     def ends_swarm(self, msg):
