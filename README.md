@@ -38,7 +38,7 @@ swarm doctor                 # verify Redis, config, and harnesses on PATH
 ```bash
 swarm rooms
 swarm --room api-v2 title "API v2 migration"
-swarm --room api-v2 join --as claude-api --harness claude --model claude-sonnet-4-6 --workspace "$PWD"
+swarm --room api-v2 join --as claude-api --harness claude --model claude-sonnet-5-5 --workspace "$PWD"
 swarm --room api-v2 send --from claude-api --to @codex-tests - <<'EOF'
 Renamed `user_id` -> `account_id` in api/users.py:44. Ready for fixture updates on branch feat/api-v2.
 EOF
@@ -50,7 +50,7 @@ swarm --room api-v2 poll --as codex-tests
 ```bash
 R=swarm-parser
 swarm --room "$R" title "Parser rewrite"
-swarm --room "$R" join --as coordinator --role coordinator --harness claude --model claude-opus-4-6
+swarm --room "$R" join --as coordinator --role coordinator --harness claude --model claude-opus-5-5
 
 swarm spawn --room "$R" --as lexer --role worker --group workers \
   --workspace ../parser-wt/lexer --brief briefs/lexer.md

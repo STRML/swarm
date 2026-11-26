@@ -28,9 +28,9 @@ seats:
 # Models the swarm may pick, with a numeric capability score (e.g. an eval index)
 # and the seats that can run each model. `effort` is passed through to codex.
 models:
-  - {model: claude-sonnet-4-6, index: 55, seats: [claude]}
-  - {model: gpt-5.4, index: 57, seats: [codex], effort: high}
-  - {model: gemini-2.5-pro, index: 59, seats: [agy]}
+  - {model: claude-sonnet-5-5, index: 55, seats: [claude]}
+  - {model: gpt-6.2-terra, index: 57, seats: [codex], effort: high}
+  - {model: gemini-4-neon-xhigh, index: 61, seats: [agy]}
 
 # Each role gets an intelligence band so a swarm runs at a consistent level.
 # A role with `writes: false` may use read-only seats (like `agy`).

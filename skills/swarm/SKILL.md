@@ -28,7 +28,7 @@ Use one room per swarm, named for the work:
 ```bash
 R=swarm-auth-refactor
 swarm --room "$R" title "Auth refactor: sessions + tests"
-swarm --room "$R" join --as coordinator --role coordinator --harness claude --model claude-sonnet-4-6
+swarm --room "$R" join --as coordinator --role coordinator --harness claude --model claude-sonnet-5-5
 swarm --room "$R" state --as coordinator waiting --doing "briefing the swarm"
 ```
 
